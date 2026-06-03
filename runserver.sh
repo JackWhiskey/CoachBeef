@@ -1,0 +1,1 @@
+PYTHONPATH=src/stravacoach uvicorn src.stravacoach.api:app --reload

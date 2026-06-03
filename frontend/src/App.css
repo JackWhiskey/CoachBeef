@@ -1,0 +1,304 @@
+/* Reset basic margins so it fills the screen perfectly */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background-color: #222831;
+}
+
+.app-container {
+  display: flex;
+  width: 100vw;
+  height: 100vh;
+  background-color: #f4f5f7; /* A subtle cool gray */
+  overflow: hidden; /* Prevents weird page-level scrolling */
+}
+
+/* =========================================
+   LEFT: Expandable Sidebar
+========================================= */
+/* --- THE SIDEBAR --- */
+
+/* Holds the 80px gap in the Flexbox layout so the feed doesn't slide under the icons */
+.sidebar-spacer {
+  width: 80px;
+  flex-shrink: 0;
+}
+
+/* The floating sidebar that expands */
+.sidebar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100vh;
+  width: 80px; 
+  background-color: #ffffff;
+  border-right: 1px solid #e1e4e8;
+  
+  /* CRITICAL FIX: Beat Leaflet's 1000 z-index */
+  z-index: 9999; 
+  
+  display: flex;
+  flex-direction: column;
+  padding: 30px 0;
+  overflow-x: hidden; 
+  white-space: nowrap; 
+  transition: width 0.3s cubic-bezier(0.25, 1, 0.5, 1), box-shadow 0.3s ease;
+}
+
+.sidebar:hover {
+  width: 240px; /* Expanded width */
+  box-shadow: 4px 0 24px rgba(0,0,0,0.06); /* Adds a drop shadow when floating over cards */
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  padding: 15px 28px; /* 28px aligns the icons perfectly in the 80px collapsed width */
+  cursor: pointer;
+  color: #666;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.menu-item .icon {
+  margin-right: 20px;
+  min-width: 24px;
+  display: flex;          /* ADD THIS */
+  align-items: center;    /* ADD THIS */
+  justify-content: center;/* ADD THIS */
+}
+
+.menu-item:hover {
+  background-color: #f4f5f7;
+  color: #fc4c02;
+}
+
+.menu-item .icon {
+  font-size: 1.3rem;
+  margin-right: 20px;
+  min-width: 24px; /* Ensures all text starts at the exact same horizontal pixel */
+  text-align: center;
+}
+
+/* Hide the text initially, then fade it in after the sidebar starts opening */
+.menu-item .label {
+  font-weight: 500;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  transition-delay: 0s;
+}
+
+/* Highlight the currently selected menu item */
+.menu-item.active {
+  color: #fc4c02; /* Strava Orange */
+  background-color: rgba(252, 76, 2, 0.08); /* Very subtle orange background */
+  border-right: 3px solid #fc4c02; /* A crisp accent line on the right edge */
+}
+
+/* Ensure the icon color updates instantly too */
+.menu-item.active .icon {
+  color: #fc4c02; 
+}
+
+.sidebar:hover .label {
+  opacity: 1;
+  transition-delay: 0.1s; /* Waits for the slide to happen before showing text */
+}
+
+/* =========================================
+   MIDDLE: Scrollable Feed
+========================================= */
+.feed-container {
+  /* flex: 0 (don't grow), 0 (don't shrink), 500px (exact width) */
+  flex: 0 0 500px; 
+  height: 100vh;
+  overflow-y: auto;
+  padding: 30px 20px;
+  border-right: 1px solid #e1e4e8;
+}
+
+.feed-content {
+  width: 100%;
+  max-width: 600px; /* Keeps the feed readable on ultrawide monitors */
+}
+
+.activity-card {
+  background: #fff;
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 20px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  border: 1px solid #ebebeb;
+}
+
+/* =========================================
+   RIGHT: AI Chat Window (Placeholder)
+========================================= */
+.chat-panel {
+  flex: 1; /* This tells the chat to take ALL remaining space */
+  background-color: #ffffff;
+  height: 100vh;
+  padding: 30px 40px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Add a smooth transition and pointer to your existing card */
+.activity-card {
+  background: #ffffff;
+  border-radius: 12px; /* Slightly rounder, friendlier corners */
+  padding: 24px;
+  margin-bottom: 20px;
+  border: 1px solid #e1e4e8;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.04); /* Softer, wider shadow */
+  transition: all 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+  cursor: pointer;
+}
+
+.activity-card:hover {
+  border-color: #dcdcdc;
+}
+
+/* The Highlighted State */
+.activity-card.selected {
+  border: 2px solid #fc4c02;
+  box-shadow: 0 8px 24px rgba(252, 76, 2, 0.12);
+}
+
+/* The Background State (when something else is selected) */
+.activity-card.dimmed {
+  opacity: 0.4;
+  transform: scale(0.98);
+}
+
+.stats-row {
+  display: flex;
+  gap: 20px;
+  font-weight: bold;
+  width: max-content; /* Only take up as much space as the text needs */
+  
+  /* The centering trick */
+  margin-left: 50%;
+  transform: translateX(-50%);
+  transition: all 0.4s cubic-bezier(0.25, 1, 0.5, 1); /* Buttery smooth slide */
+}
+
+/* The selected left-aligned state */
+.activity-card.selected .stats-row {
+  margin-left: 0;
+  transform: translateX(0);
+}
+
+.activity-card.maximized {
+  transform: scale(1.05); /* Visually pops out of the feed constraint */
+  box-shadow: 0 16px 40px rgba(252, 76, 2, 0.2);
+  z-index: 20;
+}
+
+/* --- SETTINGS PANEL --- */
+.setting-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px;
+  background-color: #f8f9fa;
+  border: 1px solid #e1e4e8;
+  border-radius: 8px;
+  margin-bottom: 15px;
+}
+
+.setting-info h4 {
+  margin: 0 0 5px 0;
+  color: #333;
+}
+
+.setting-info p {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #666;
+}
+
+/* Modern Toggle Switch */
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 50px;
+  height: 28px;
+  flex-shrink: 0; /* Prevents text from squishing the toggle */
+}
+
+.toggle-switch input { 
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-color: #ccc;
+  transition: .4s;
+  border-radius: 34px;
+}
+
+.toggle-slider:before {
+  position: absolute;
+  content: "";
+  height: 20px;
+  width: 20px;
+  left: 4px;
+  bottom: 4px;
+  background-color: white;
+  transition: .4s;
+  border-radius: 50%;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+}
+
+input:checked + .toggle-slider {
+  background-color: #fc4c02; /* Strava Orange when active! */
+}
+
+input:checked + .toggle-slider:before {
+  transform: translateX(22px);
+}
+
+/* Coach chat bubbles */
+.coach-markdown p {
+  margin-top: 0;
+  margin-bottom: 10px;
+}
+.coach-markdown p:last-child {
+  margin-bottom: 0;
+}
+
+.coach-markdown ul, 
+.coach-markdown ol {
+  margin-top: 5px;
+  margin-bottom: 10px;
+  padding-left: 25px; 
+}
+
+.coach-markdown li {
+  margin-bottom: 4px; 
+}
+
+.coach-markdown h1,
+.coach-markdown h2,
+.coach-markdown h3,
+.coach-markdown h4,
+.coach-markdown h5,
+.coach-markdown h6 {
+  color: #333 !important;
+  margin-top: 15px;
+  margin-bottom: 8px;
+  line-height: 1.2;
+}
+
+.coach-markdown *:first-child {
+  margin-top: 0;
+}
