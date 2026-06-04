@@ -2,7 +2,7 @@ import json
 # Make sure you are importing the instantiated client instance!
 # If your main file creates `db_client = DBClient()`, import that instance here.
 from db_client import DBClient
-from db_model import DBActivity, DBChatMessage
+from db_model import DBActivity, DBActivityDetail, DBChatMessage
 
 local_db_client = DBClient()
 
@@ -116,6 +116,106 @@ def search_past_advice(limit: int = 5) -> str:
         return json.dumps(history)
     except Exception as e:
         print(f"❌ Error in search_past_advice: {e}")
+        return json.dumps({"error": str(e)})
+    finally:
+        db.close()
+
+def get_laps_and_splits(activity_id: int) -> str:
+    """Tool: Fetches lap/split data. Highly compressed to save tokens."""
+    print(f"🛠️ Executor tool: get_laps_and_splits({activity_id})")
+    db = next(local_db_client.get_db())
+    try:
+        detail = db.query(DBActivityDetail).filter(DBActivityDetail.id == activity_id).first()
+        if not detail:
+            return json.dumps({"error": f"No lap/split data found for {activity_id}."})
+        
+        # 1. Compress Laps
+        laps_trimmed = []
+        if detail.laps:
+            for l in detail.laps:
+                laps_trimmed.append({
+                    "lap": l.get("lap_index"),
+                    "dist": round(l.get("distance", 0), 1), # Round to 1 decimal
+                    "time": round(l.get("moving_time", 0), 1),
+                    "spd": round(l.get("average_speed", 0), 2),
+                    "hr": round(l.get("average_heartrate", 0)) if l.get("average_heartrate") else None
+                })
+                
+        # 2. Compress Splits
+        splits_trimmed = []
+        if detail.splits:
+            for s in detail.splits:
+                splits_trimmed.append({
+                    "split": s.get("split"),
+                    "dist": round(s.get("distance", 0), 1),
+                    "time": round(s.get("moving_time", 0), 1),
+                    "spd": round(s.get("average_speed", 0), 2),
+                    "hr": round(s.get("average_heartrate", 0)) if s.get("average_heartrate") else None
+                })
+
+        return json.dumps({"laps": laps_trimmed, "splits": splits_trimmed})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+    finally:
+        db.close()
+
+def get_recent_similar_activities(workout_type: str, limit: int = 5) -> str:
+    """Tool: Fetches recent similar activities. Compressed format."""
+    print(f"🛠️ Executor tool: get_recent_similar_activities(type={workout_type}, limit={limit})")
+    db = next(local_db_client.get_db())
+    
+    try:
+        activities = (
+            db.query(DBActivity)
+            .filter(DBActivity.workout_type == workout_type)
+            .order_by(DBActivity.start_date.desc())
+            .limit(limit)
+            .all()
+        )
+        
+        if not activities:
+            return json.dumps({"error": "No recent activities found."})
+            
+        history = []
+        for act in activities:
+            # Safely slice the ISO date string to just grab YYYY-MM-DD
+            date_str = act.start_date[:10] if act.start_date else "Unknown"
+            
+            history.append({
+                "date": date_str,
+                "name": act.name,
+                "dist": round(act.distance, 1),
+                "time": round(act.moving_time, 1),
+                "spd": round(act.average_speed, 2),
+                "hr": round(act.average_heartrate) if getattr(act, "average_heartrate", None) else None
+            })
+            
+        return json.dumps(history)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+    finally:
+        db.close()
+
+
+def get_time_series_streams(activity_id: int) -> str:
+    """Tool: Fetches downsampled continuous data for graphing line charts from the LOCAL DB."""
+    print(f"🛠️ Executor tool: get_time_series_streams({activity_id})")
+    db = next(local_db_client.get_db())
+    
+    try:
+        detail = db.query(DBActivityDetail).filter(DBActivityDetail.id == activity_id).first()
+        
+        if not detail or not detail.streams:
+            return json.dumps({"error": f"No local stream data found for {activity_id}."})
+            
+        # Remember the SQLite JSON trap! We have to parse the string back into a list.
+        raw_streams = detail.streams
+        if isinstance(raw_streams, str):
+            raw_streams = json.loads(raw_streams)
+            
+        return json.dumps(raw_streams)
+        
+    except Exception as e:
         return json.dumps({"error": str(e)})
     finally:
         db.close()

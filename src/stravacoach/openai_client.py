@@ -4,7 +4,9 @@ from openai import AsyncOpenAI
 
 from pydantic import BaseModel
 from config import Config
-from tools import get_activity_from_db, get_activity_list_over_time, get_activity_list_over_time, get_summary_stats_over_time, search_past_advice
+from chart_model import DashboardModel, DashboardPlan
+from db_model import DBActivity
+from tools import get_activity_from_db, get_activity_list_over_time, get_activity_list_over_time, get_laps_and_splits, get_recent_similar_activities, get_summary_stats_over_time, get_time_series_streams, search_past_advice
 
 DEFAULT_MODEL = "gemini-2.0-flash"
 DEFAULT_SYSTEM_INSTRUCTION = (
@@ -164,6 +166,85 @@ coach_tool_functions = {
     "get_activity_list_over_time": get_activity_list_over_time
 }
 
+dashboard_tools_schema = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_time_series_streams",
+            "description": "Fetches continuous minute-by-minute stream data (time, heart rate, pace) for an activity. Crucial for drawing continuous line charts like Heart Rate over time.",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "activity_id": {
+                        "type": "integer",
+                        "description": "The Strava Activity ID"
+                    }
+                },
+                "required": ["activity_id"],
+                "additionalProperties": False
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_laps_and_splits",
+            "description": "Fetches the lap and split data for a specific activity. Use this to draw interval pace bar charts or lap comparisons.",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "activity_id": {
+                        "type": "integer", 
+                        "description": "The Strava Activity ID"
+                    }
+                },
+                "required": ["activity_id"],
+                "additionalProperties": False
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recent_similar_activities",
+            "description": "Fetches recent activities of the same workout_type. Use this to draw trend lines comparing the current run to past runs.",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "workout_type": {
+                        "type": "string", 
+                        "enum": [
+                            "Run - Standard", 
+                            "Run - Race", 
+                            "Run - Long Run", 
+                            "Run - Workout", 
+                            "Ride - None",
+                            "Ride - Race",
+                            "Ride - Workout",
+                            "Unknown"
+                        ],
+                    },
+                    "limit": {
+                        "type": "integer", 
+                        "description": "How many past runs to fetch. Default is 5."
+                    }
+                },
+                "required": ["workout_type", "limit"], 
+                "additionalProperties": False
+            }
+        }
+    }
+]
+
+dashboard_tool_functions = {
+    "get_time_series_streams": get_time_series_streams,
+    "get_laps_and_splits": get_laps_and_splits,
+    "get_recent_similar_activities": get_recent_similar_activities
+}
+
 class OpenAIManager():
 
     def __init__(
@@ -194,11 +275,78 @@ class OpenAIManager():
             api_key=Config.OPENAI_API_KEY
         )
 
-        print(f"Initialized OpenAIManager with model {self.model}, tools {self.tools}, and system instruction: {self.system_instruction}")
+        # print(f"Initialized OpenAIManager with model {self.model}, tools {self.tools}, and system instruction: {self.system_instruction}")
 
     async def send_message_athlete_intelligence(self, user_text: str, context: str = "") -> str:
         pass
 
+    async def generate_dashboard_plan(self, sys_prompt: str, user_prompt: str) -> str:
+        try:
+            plan_response = await self.client.beta.chat.completions.parse(
+                model="gpt-4o-mini",
+                messages= [
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                response_format=DashboardPlan
+            )
+
+            dashboard_plan = plan_response.choices[0].message.parsed
+            print(f"AI Planner suggested: {[c.title for c in dashboard_plan.recommended_charts]}")
+            return dashboard_plan
+        except Exception as e:
+            print(f"Error while creating dashboard plan: {e}")
+
+    async def execute_dashboard_with_plan(self, sys_prompt: str, user_prompt: str, max_iterations: int):
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+
+        iteration = 0
+        while iteration < max_iterations:
+            iteration+=1
+            api_args = {
+                "model": "gpt-4o-mini",
+                "messages": messages,
+                "response_format": DashboardModel
+            }
+            if iteration < max_iterations:
+                api_args["tools"] = dashboard_tools_schema
+
+            response = await self.client.beta.chat.completions.parse(**api_args)
+            message = response.choices[0].message
+
+            # If the model wants to use tools, execute them and loop again!
+            if message.tool_calls:
+                messages.append(message) # Append the model's tool request to history
+                
+                for tool_call in message.tool_calls:
+                    func_name = tool_call.function.name
+                    args = json.loads(tool_call.function.arguments)
+                    print(f"Executor fetching data with tool: {func_name}({args})")
+                    
+                    # Execute the matched Python function
+                    if dashboard_tool_functions and func_name in dashboard_tool_functions:
+                        try:
+                            result = dashboard_tool_functions[func_name](**args)
+                        except Exception as e:
+                            result = json.dumps({"error": str(e)})
+                    else:
+                        result = json.dumps({"error": f"Tool '{func_name}' not found."})
+
+                    # Feed the data back into the message array
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": func_name,
+                        "content": str(result)
+                    })
+                # The while loop restarts here, sending the newly fetched data back to OpenAI
+                
+            else:
+                # No more tool calls? The model finished drawing the charts!
+                return message.parsed
 
     async def send_message(self, user_text: str, context: str = "", chat_history: list = None) -> str:
         if chat_history is None:
@@ -288,6 +436,33 @@ class OpenAIManager():
             
         # If no tools were called, just return the text response directly
         return message.content
+
+
+    async def generate_dashboard_for_activity(self, activity: DBActivity):
+         # 2. Construct the prompt with the raw data
+        system_prompt = (
+            "You are an expert sports data analyst. Based on the user's Strava activity data, "
+            "generate a dashboard. If it's a long run, show Heart Rate over time. "
+            "If it's an interval session, show a bar chart of pace per split. "
+            "Return the EXACT JSON structure required by Apache ECharts."
+        )
+        
+        user_prompt = f"Activity Type: {activity.type}\nDistance: {activity.distance}\nTime: {activity.moving_time}\n..."
+        
+        # 3. Use client.beta.chat.completions.parse to force structured JSON output!
+        response = await self.client.beta.chat.completions.parse(
+            model="gpt-4o-mini", # Standard model works well, but you can use gpt-4o for complex charting
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            response_format=DashboardModel,
+        )
+        
+        # 4. Extract the cleanly parsed Python object
+        dashboard_data = response.choices[0].message.parsed
+        return dashboard_data
+
 
 class ChatRequest(BaseModel):
     message: str

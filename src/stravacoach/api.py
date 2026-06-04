@@ -1,3 +1,4 @@
+from asyncio import tasks
 from contextlib import asynccontextmanager
 import json
 import asyncio
@@ -5,6 +6,7 @@ import asyncio
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sync_manager import sync_detailed_activities, sync_strava_to_db
 from stravalib.model import DetailedAthlete
 from requests import Session
 from openai_client import OpenAIManager, ChatRequest
@@ -12,30 +14,29 @@ from db_client import DBClient
 from stravalib.strava_model import DetailedActivity, SummaryActivity, Zones
 from datetime import datetime
 from strava_client import StravaManager
-from db_model import DBActivity, DBChatMessage, PersistDBChatMessage
+from db_model import DBActivity, DBActivityDetail, DBChatMessage, PersistDBChatMessage
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Server is spinning up...")
+    tasks = []
+
     if strava_manager and db_client:
         print("Triggering automatic Strava sync...")
         # Manually extract a database session from the generator
-        db = next(db_client.get_db())
-        try:
-            # Assumes you defined sync_strava_to_db in this file or imported it
-            sync_strava_to_db(db=db)
-        except Exception as e:
-            print(f"Startup sync failed: {e}")
-        finally:
-            db.close()
+        startup_sync_task = asyncio.create_task(run_initial_syncs())
+        tasks.append(startup_sync_task)
 
     background_sync = asyncio.create_task(periodic_strava_sync())
-    
+    detailed_sync = asyncio.create_task(periodic_detailed_strava_sync())
+    tasks.extend([background_sync, detailed_sync])
+
     yield # This yields control back to FastAPI so it can start accepting requests!
     
     # --- SHUTDOWN ---
     print("Server shutting down...")
-    background_sync.cancel()
+    for task in tasks:
+        task.cancel()
 
 # Initialize the FastAPI app
 app = FastAPI(title="StravaCoach API", lifespan=lifespan)
@@ -128,7 +129,8 @@ def get_activities(before: str | None = None, after: str | None = None, limit: i
                 moving_time=act.moving_time,
                 average_speed=act.average_speed,
                 # stravalib expects a map object for the polyline
-                map={"summary_polyline": act.summary_polyline} 
+                map={"summary_polyline": act.summary_polyline},
+                workout_type=act.workout_type_num
             )
             safe_dict = json.loads(summary.json())
             results.append(safe_dict)
@@ -241,6 +243,70 @@ async def isolated_chat_with_coach(request: ChatRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
+
+@app.post("/api/dashboard/generate")
+async def generate_dashboard(activity_id: int):
+    # -- Basic Activity Request
+    db = next(db_client.get_db())
+    activity_summary = db.query(DBActivity).filter(DBActivity.id == activity_id).first()
+    activity_detail = db.query(DBActivityDetail).filter(DBActivity.id == activity_id).first()
+    db.close()
+    if not activity_summary:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    if not activity_detail:
+        print(f"Warning: detail for activity {activity_id} not found. Syncing...")
+        await periodic_detailed_strava_sync()
+        activity_detail = db.query(DBActivityDetail).filter(DBActivityDetail.id == activity_id).first()
+        if not activity_detail:
+            raise HTTPException(status_code=404, detail="Activity Detail not found")
+    
+    try:
+        planner_system_prompt = (
+            "You are an expert running coach. "
+            "Look at the basic activity summary and recommend a MAX of 4 specific charts that would provide the best analytical value. "
+            "Think about highlighting good/bad things or comparing effort to past activities"
+        )
+        planner_user_prompt = (
+            f"Title: {activity_summary.name}\nActivity type: {activity_summary.type}\n"
+            f"Workout type: {activity_summary.workout_type}\n"
+        )
+
+        plan_response = await openai_manager.generate_dashboard_plan(planner_system_prompt, planner_user_prompt)
+
+        #
+        #   TODO: DO SOMETHING TO THE DASHBOARD PLAN
+        #
+
+        executor_system = (
+            "You are an expert sports data analyst and Apache ECharts developer. "
+            "Your job is to take the Coach's requested charts and the raw activity data, "
+            "and generate the exact JSON structure required to render those charts in ECharts.\n\n"
+            "CRITICAL RULES:\n"
+            "1. Only use the data provided in the prompt. DO NOT invent or hallucinate data points.\n"
+            "2. For an xAxis with an array of string dates/labels, you MUST set the type to 'category'."
+        )
+
+        executor_user = (
+            f"COACH'S PLAN:\n{plan_response.json()}\n\n"
+            f"CURRENT ACTIVITY ID: {activity_id}\n\n"
+            "Use your tools to fetch the necessary data for this plan. Once you have enough data, construct the dashboard."
+        )
+
+        executor_response = await openai_manager.execute_dashboard_with_plan(executor_system, executor_user, 5)
+        print(plan_response.coach_insight)
+        # executor_response.summary_text = plan_response.coach_insight
+
+        return executor_response
+   
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/dashboard/generate")
+async def generate_dashboard():
+    pass
+
+
+    
 # ==========================================
 # DB EXPOSED API ENDPOINTS
 # ==========================================
@@ -292,64 +358,38 @@ async def periodic_strava_sync():
         if strava_manager and db_client:
             db = next(db_client.get_db())
             try:
-                sync_strava_to_db(db=db)
+                sync_strava_to_db(db=db, strava_manager=strava_manager)
             except Exception as e:
                 print(f"Periodic sync failed: {e}")
             finally:
                 db.close()
 
-def sync_strava_to_db(db: Session):
-    print("Starting Strava Sync...")
-    
-    # 1. Find the most recent activity in the database
-    latest_activity = db.query(DBActivity).order_by(DBActivity.start_date.desc()).first()
-    
-    after_date = None
-    if latest_activity and latest_activity.start_date:
-        try:
-            # Convert the stored ISO string back to a datetime object for the Strava client
-            after_date = datetime.strptime(latest_activity.start_date, "%Y-%m-%dT%H:%M:%SZ")
-            print(f"Last activity found on: {after_date}. Fetching only newer activities...")
-        except Exception as e:
-            print(f"Error parsing date {latest_activity.start_date}: {e}. Defaulting to full sync.")
+async def periodic_detailed_strava_sync():
+    while(True):
+        await asyncio.sleep(3600)
+        print("Running periodic Strava sync...")
+        if strava_manager and db_client:
+            db = next(db_client.get_db())
+            try:
+                sync_detailed_activities(db=db, strava_manager=strava_manager, limit=20)
+            except Exception as e:
+                print(f"Periodic sync failed: {e}")
+            finally:
+                db.close()
 
-    # 2. Fetch from Strava (Pass 'after' to only get new stuff)
-    # If after_date is None, this safely fetches your most recent activities up to the limit
-    raw_activities = strava_manager.get_activities(before=None,after=after_date, limit=200)
-
-    # 3. Upsert into the Database
-    synced_count = 0
-    for act in raw_activities:
-        act_dict = json.loads(act.json())
-        
-        # Safely extract the polyline string (it's nested inside the 'map' object)
-        polyline = ""
-        if act_dict.get("map") and act_dict["map"].get("summary_polyline"):
-            polyline = act_dict["map"]["summary_polyline"]
-
-        # Map the Strava dictionary to your SQLAlchemy Model
-        db_act = DBActivity(
-            id=act_dict["id"],
-            name=act_dict.get("name", "Unknown Activity"),
-            type=act_dict.get("type", "Workout"),
-            start_date=act_dict.get("start_date", ""),
-            distance=act_dict.get("distance", 0.0),
-            moving_time=act_dict.get("moving_time", 0),
-            average_speed=act_dict.get("average_speed", 0.0),
-            summary_polyline=polyline
-        )
-        
-        # db.merge checks the Primary Key (id). Updates if found, inserts if new!
-        db.merge(db_act)
-        synced_count += 1
-
-    # 4. Commit the transaction
+async def run_initial_syncs():
+    """Runs the initial database syncs in the background without blocking the server."""
+    print("Triggering automatic background Strava sync...")
+    db = next(db_client.get_db())
     try:
-        db.commit()
-        print(f"Sync complete! Inserted/Updated {synced_count} activities.")
+        # asyncio.to_thread runs your synchronous function in a separate thread
+        # so it physically cannot freeze the main FastAPI event loop!
+        await asyncio.to_thread(sync_strava_to_db, db, strava_manager)
+        
+        await sync_detailed_activities(db=db, strava_manager=strava_manager, limit=50)
+        print("Initial syncs complete")
+        
     except Exception as e:
-        db.rollback()
-        print(f"Database error during sync: {e}")
-        raise e
-
-    return synced_count
+        print(f"Initial sync gracefully aborted (Rate Limit or Error): {e}")
+    finally:
+        db.close()

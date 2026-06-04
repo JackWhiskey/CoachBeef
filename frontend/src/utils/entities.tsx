@@ -207,7 +207,7 @@ export interface SummaryActivity extends MetaActivity {
     // Similar to Normalized Power. Rides with power meter data only
     weighted_average_watts: number | null,
     // The activity's workout type
-    workout_type: number | null
+    workout_type: string | null
 }
 
 export interface MetaAthlete {
@@ -319,4 +319,35 @@ enum SportType {
     "Windsurf",
     "Workout",
     "Yoga"
+}
+
+export interface ChartTitle {
+    text: string;
+}
+
+export interface ChartAxis {
+    type: string;
+    data: string[];
+}
+
+export interface ChartSeries {
+    name: string;
+    type: string;
+    data: number[];
+}
+
+export interface EChartOption {
+    title: ChartTitle;
+    xAxis: ChartAxis;
+    yAxis: ChartAxis;
+    series: ChartSeries[];
+}
+
+export interface DashboardData {
+    summary_text: string;
+    charts: EChartOption[];
+}
+
+export interface DashboardPanelProps {
+    selectedActivityId: number | null;
 }

@@ -20,7 +20,9 @@ function App() {
 
   const rightPanels: Record<string, JSX.Element> = {
     dashboard: (
-      <DashboardPanel/>
+      <DashboardPanel
+      selectedActivityId={selectedId}
+      />
     ),
     activities: (
       <ActivitiesPanel/>
